@@ -4,17 +4,42 @@ import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 
-from train_lstm import SolarLSTM
-from sequence import create_sequences
+from train_mulivariate_lstm import LSTMModel, create_sequences
 from preprocess import load_and_preprocess
+
+from sklearn.preprocessing import MinMaxScaler
 
 # ==========================
 # LOAD DATA & PREPROCESS
 # ==========================
 print("Loading data...")
 
-# load_and_preprocess handles dropping the 'time' column and scaling all 4 features
-scaled_data, scaler = load_and_preprocess("solar_data.csv")
+df = pd.read_csv("solar_data.csv")
+df["time"] = pd.to_datetime(df["time"])
+df["time"] = df["time"] + pd.Timedelta(hours=5)
+df["hour"] = df["time"].dt.hour
+df["day_of_year"] = df["time"].dt.dayofyear
+
+feature_columns = [
+    "temperature_2m (°C)",
+    "shortwave_radiation (W/m²)",
+    "Cell_Temp (°C)",
+    "hour",
+    "day_of_year",
+    "Solar_Power (kW)"
+]
+
+data = df[feature_columns].values
+target = df["Solar_Power (kW)"].values.reshape(-1, 1)
+
+train_size = int(0.8 * len(data))
+scaler_X = MinMaxScaler()
+scaler_y = MinMaxScaler()
+scaler_X.fit(data[:train_size])
+scaler_y.fit(target[:train_size])
+
+X_scaled = scaler_X.transform(data)
+y_scaled = scaler_y.transform(target)
 
 # ==========================
 # CREATE SEQUENCES
@@ -23,8 +48,8 @@ seq_length = 24
 
 print("Creating sequences...")
 
-# create_sequences from sequence.py already handles taking 4 features in X and 1 feature in y
-X, y = create_sequences(scaled_data, seq_length)
+# create_sequences from sequence.py
+X, y = create_sequences(X_scaled, y_scaled, seq_length)
 
 X = torch.tensor(X, dtype=torch.float32)
 
@@ -33,9 +58,9 @@ X = torch.tensor(X, dtype=torch.float32)
 # ==========================
 print("Loading trained model...")
 
-# We must use SolarLSTM here because this is the architecture we saved in train_lstm.py!
-model = SolarLSTM()
-model.load_state_dict(torch.load("solar_lstm_model.pth"))
+input_size = X.shape[2]
+model = LSTMModel(input_size=input_size)
+model.load_state_dict(torch.load("solar_lstm_v3.pth"))
 model.eval()
 
 # ==========================
@@ -49,14 +74,8 @@ with torch.no_grad():
 # ==========================
 # INVERSE SCALE
 # ==========================
-# We only want to inverse transform the last column (Solar Power)
-dummy_pred = np.zeros((len(predictions), scaled_data.shape[1]))
-dummy_pred[:, -1] = predictions.flatten()
-predictions = scaler.inverse_transform(dummy_pred)[:, -1]
-
-dummy_actual = np.zeros((len(y), scaled_data.shape[1]))
-dummy_actual[:, -1] = y.flatten()
-actual = scaler.inverse_transform(dummy_actual)[:, -1]
+predictions = scaler_y.inverse_transform(predictions)
+actual = scaler_y.inverse_transform(y.reshape(-1, 1))
 
 # ==========================
 # METRICS
