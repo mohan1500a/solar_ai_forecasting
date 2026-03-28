@@ -2,10 +2,9 @@ import torch
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-from sklearn.metrics import mean_absolute_error, mean_squared_error
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score, mean_absolute_percentage_error
 
-from train_mulivariate_lstm import LSTMModel, create_sequences
-from preprocess import load_and_preprocess
+from train_mulivariate_lstm import TimeSeriesModel, create_sequences
 
 from sklearn.preprocessing import MinMaxScaler
 
@@ -14,7 +13,7 @@ from sklearn.preprocessing import MinMaxScaler
 # ==========================
 print("Loading data...")
 
-df = pd.read_csv("solar_data.csv")
+df = pd.read_csv("solar_data.csv", encoding="latin1").dropna(subset=["time"])
 df["time"] = pd.to_datetime(df["time"])
 df["time"] = df["time"] + pd.Timedelta(hours=5)
 df["hour"] = df["time"].dt.hour
@@ -24,6 +23,7 @@ feature_columns = [
     "temperature_2m (°C)",
     "shortwave_radiation (W/m²)",
     "Cell_Temp (°C)",
+    "pressure_msl",
     "hour",
     "day_of_year",
     "Solar_Power (kW)"
@@ -59,8 +59,8 @@ X = torch.tensor(X, dtype=torch.float32)
 print("Loading trained model...")
 
 input_size = X.shape[2]
-model = LSTMModel(input_size=input_size)
-model.load_state_dict(torch.load("solar_lstm_v3.pth"))
+model = TimeSeriesModel(input_size=input_size, hidden_size=128, num_layers=2, model_type='LSTM')
+model.load_weights("solar_lstm_best.pth")
 model.eval()
 
 # ==========================
@@ -82,10 +82,17 @@ actual = scaler_y.inverse_transform(y.reshape(-1, 1))
 # ==========================
 mae = mean_absolute_error(actual, predictions)
 rmse = np.sqrt(mean_squared_error(actual, predictions))
+r2 = r2_score(actual, predictions)
+
+# Robust MAPE ignoring night-time zero outputs
+mask = actual > 0.01
+mape = mean_absolute_percentage_error(actual[mask], predictions[mask]) if mask.sum() > 0 else 0.0
 
 print("\nModel Evaluation:")
-print("MAE :", mae)
-print("RMSE:", rmse)
+print(f"MAE  : {mae:.5f}")
+print(f"RMSE : {rmse:.5f}")
+print(f"MAPE : {mape:.5f}")
+print(f"R²   : {r2:.5f}")
 
 # ==========================
 # PLOT

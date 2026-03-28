@@ -3,29 +3,56 @@ import torch.nn as nn
 import pandas as pd
 import numpy as np
 from sklearn.preprocessing import MinMaxScaler
-from sklearn.metrics import mean_absolute_error, mean_squared_error
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score, mean_absolute_percentage_error
 from torch.utils.data import TensorDataset, DataLoader
 
 # =========================
 # MODEL
 # =========================
-class LSTMModel(nn.Module):
-    def __init__(self, input_size, hidden_size=128):
+class TimeSeriesModel(nn.Module):
+    def __init__(self, input_size, hidden_size=128, num_layers=2, model_type='LSTM'):
         super().__init__()
-        self.lstm = nn.LSTM(
-            input_size=input_size,
-            hidden_size=hidden_size,
-            num_layers=2,
-            batch_first=True,
-            dropout=0.2
-        )
+        self.model_type = model_type
+        
+        # Dropout is only applied if num_layers > 1
+        dropout_rate = 0.2 if num_layers > 1 else 0.0
+        
+        if model_type == 'LSTM':
+            self.rnn = nn.LSTM(
+                input_size=input_size,
+                hidden_size=hidden_size,
+                num_layers=num_layers,
+                batch_first=True,
+                dropout=dropout_rate
+            )
+        elif model_type == 'GRU':
+            self.rnn = nn.GRU(
+                input_size=input_size,
+                hidden_size=hidden_size,
+                num_layers=num_layers,
+                batch_first=True,
+                dropout=dropout_rate
+            )
+        else:
+            raise ValueError(f"Unknown model_type: {model_type}")
+            
         self.fc = nn.Linear(hidden_size, 1)
 
     def forward(self, x):
-        out, _ = self.lstm(x)
+        out, _ = self.rnn(x)
         out = out[:, -1, :]
         out = self.fc(out)
         return out
+
+    def load_weights(self, path):
+        """Robust loader that handles key renaming from 'lstm' to 'rnn'"""
+        state_dict = torch.load(path, weights_only=True)
+        new_state_dict = {}
+        for k, v in state_dict.items():
+            # If the saved model used 'lstm.weight...' but the new class uses 'rnn.weight...'
+            new_key = k.replace('lstm.', 'rnn.') if k.startswith('lstm.') else k
+            new_state_dict[new_key] = v
+        self.load_state_dict(new_state_dict)
 
 # =========================
 # CREATE SEQUENCES
@@ -42,7 +69,7 @@ if __name__ == "__main__":
     # LOAD DATA
     # =========================
     print("Loading dataset...")
-    df = pd.read_csv("solar_data.csv")
+    df = pd.read_csv("solar_data.csv", encoding="latin1").dropna(subset=["time"])
     df["time"] = pd.to_datetime(df["time"])
     
     # Convert UTC to User's Local Time (+5 hours) so hours match physical sunlight without fractional minutes
@@ -61,6 +88,7 @@ if __name__ == "__main__":
         "temperature_2m (°C)",
         "shortwave_radiation (W/m²)",
         "Cell_Temp (°C)",
+        "pressure_msl",
         "hour",
         "day_of_year",
         "Solar_Power (kW)"
@@ -110,10 +138,10 @@ if __name__ == "__main__":
     train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
     
     # =========================
-    # INITIALIZE MODEL
+    # INITIALIZE MODEL (Using the best found architecture)
     # =========================
     input_size = X_train.shape[2]
-    model = LSTMModel(input_size=input_size)
+    model = TimeSeriesModel(input_size=input_size, hidden_size=128, num_layers=2, model_type='LSTM')
     criterion = nn.MSELoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
     
@@ -141,8 +169,8 @@ if __name__ == "__main__":
     # =========================
     # SAVE MODEL
     # =========================
-    torch.save(model.state_dict(), "solar_lstm_v3.pth")
-    print("Model saved: solar_lstm_v3.pth")
+    torch.save(model.state_dict(), "solar_lstm_best.pth")
+    print("Model saved: solar_lstm_best.pth")
     
     # =========================
     # EVALUATION
@@ -156,7 +184,14 @@ if __name__ == "__main__":
     
     mae = mean_absolute_error(actual, predictions)
     rmse = np.sqrt(mean_squared_error(actual, predictions))
+    r2 = r2_score(actual, predictions)
+    
+    # Robust MAPE ignoring night-time zero outputs
+    mask = actual > 0.01
+    mape = mean_absolute_percentage_error(actual[mask], predictions[mask]) if mask.sum() > 0 else 0.0
     
     print("\nModel Evaluation")
-    print("MAE :", mae)
-    print("RMSE:", rmse)
+    print(f"MAE  : {mae:.5f}")
+    print(f"RMSE : {rmse:.5f}")
+    print(f"MAPE : {mape:.5f}")
+    print(f"R²   : {r2:.5f}")

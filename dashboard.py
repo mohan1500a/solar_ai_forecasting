@@ -3,10 +3,9 @@ import pandas as pd
 import numpy as np
 import torch
 import plotly.graph_objects as go
-from sklearn.metrics import mean_absolute_error, mean_squared_error
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score, mean_absolute_percentage_error
 
-from train_mulivariate_lstm import LSTMModel, create_sequences
-from preprocess import load_and_preprocess
+from train_mulivariate_lstm import TimeSeriesModel, create_sequences
 
 # ================================
 # PAGE CONFIGURATION
@@ -41,6 +40,11 @@ html, body, [class*="css"] {
     box-shadow: 0 10px 40px 0 rgba(0, 0, 0, 0.4);
     text-align: center;
     transition: all 0.4s ease;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    min-height: 160px;
 }
 
 .metric-container:hover {
@@ -98,7 +102,7 @@ from sklearn.preprocessing import MinMaxScaler
 @st.cache_resource(show_spinner=False)
 def load_data_and_model():
     # Load and preprocess the data exactly as in training
-    df = pd.read_csv("solar_data.csv")
+    df = pd.read_csv("solar_data.csv", encoding="latin1").dropna(subset=["time"])
     df["time"] = pd.to_datetime(df["time"])
     df["time"] = df["time"] + pd.Timedelta(hours=5)
     df["hour"] = df["time"].dt.hour
@@ -108,6 +112,7 @@ def load_data_and_model():
         "temperature_2m (°C)",
         "shortwave_radiation (W/m²)",
         "Cell_Temp (°C)",
+        "pressure_msl",
         "hour",
         "day_of_year",
         "Solar_Power (kW)"
@@ -134,8 +139,8 @@ def load_data_and_model():
     
     # Load optimized neural network
     input_size = X_tensor.shape[2]
-    model = LSTMModel(input_size=input_size, hidden_size=128)
-    model.load_state_dict(torch.load("solar_lstm_v3.pth", weights_only=True))
+    model = TimeSeriesModel(input_size=input_size, hidden_size=128, num_layers=2, model_type='LSTM')
+    model.load_weights("solar_lstm_best.pth")
     model.eval()
     
     # Run historical prediction block
@@ -150,13 +155,17 @@ def load_data_and_model():
     # --------------------------------
     steps = 24
     last_time = df["time"].iloc[-1]
-    future_times = pd.date_range(start=last_time, periods=steps+1, freq="h")[1:]
+    
+    base_date = last_time.date()
+    start_time = pd.Timestamp(f"{base_date} 08:00:00")
+    future_times = pd.date_range(start=start_time, periods=steps, freq="h")
     
     future_df = pd.DataFrame({"time": future_times})
     future_df["hour"] = future_df["time"].dt.hour
     future_df["day_of_year"] = future_df["time"].dt.dayofyear
     future_df["temperature_2m (°C)"] = df["temperature_2m (°C)"].iloc[-1]
     future_df["Cell_Temp (°C)"] = df["Cell_Temp (°C)"].iloc[-1]
+    future_df["pressure_msl"] = df["pressure_msl"].iloc[-1]
     
     # Day/Night curve mapping
     future_df["shortwave_radiation (W/m²)"] = future_df["hour"].apply(
@@ -183,6 +192,7 @@ def load_data_and_model():
             future_df["temperature_2m (°C)"].iloc[i],
             future_df["shortwave_radiation (W/m²)"].iloc[i],
             future_df["Cell_Temp (°C)"].iloc[i],
+            future_df["pressure_msl"].iloc[i],
             future_df["hour"].iloc[i],
             future_df["day_of_year"].iloc[i],
             raw_power_pred
@@ -203,20 +213,35 @@ with st.spinner("Initializing Deep Learning Engine..."):
 # Evaluate Metrics globally 
 mae = mean_absolute_error(actual, predictions)
 rmse = np.sqrt(mean_squared_error(actual, predictions))
+r2 = r2_score(actual, predictions)
+
+# Robust MAPE ignoring night-time zero outputs
+mask = actual > 0.01
+mape = mean_absolute_percentage_error(actual[mask], predictions[mask]) if mask.sum() > 0 else 0.0
+
 total_future_energy = np.sum(future_predictions)
+
+peak_idx = np.argmax(future_predictions)
+peak_time_str = future_times[peak_idx].strftime("%Y-%m-%d %H:%M") # Slightly shorter for dashboard
+peak_power_val = future_predictions[peak_idx]
 
 # ================================
 # PERFORMANCE METRICS ROW
 # ================================
-col1, col2, col3, col4 = st.columns(4)
+# Increased to 6 columns for new metrics
+col1, col2, col3, col4, col5, col6 = st.columns(6)
 with col1:
-    st.markdown(f'<div class="metric-container"><div class="metric-title">Mean Absolute Error</div><div class="metric-value">{mae:.3f} kW</div></div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="metric-container"><div class="metric-title">MAE</div><div class="metric-value">{mae:.3f}</div></div>', unsafe_allow_html=True)
 with col2:
-    st.markdown(f'<div class="metric-container"><div class="metric-title">Root Mean Squared</div><div class="metric-value">{rmse:.3f} kW</div></div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="metric-container"><div class="metric-title">MAPE</div><div class="metric-value" style="color:#10b981;">{mape:.1%}</div></div>', unsafe_allow_html=True)
 with col3:
-    st.markdown(f'<div class="metric-container"><div class="metric-title">Pred. Energy (24h)</div><div class="metric-value" style="color:#00D2FF;">{total_future_energy:.2f} kWh</div></div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="metric-container"><div class="metric-title">R² Accuracy</div><div class="metric-value">{r2:.3f}</div></div>', unsafe_allow_html=True)
 with col4:
-    st.markdown(f'<div class="metric-container"><div class="metric-title">Data Lookback</div><div class="metric-value">24 Hours</div></div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="metric-container"><div class="metric-title">24h Generation</div><div class="metric-value" style="color:#00D2FF;">{total_future_energy:.1f} kWh</div></div>', unsafe_allow_html=True)
+with col5:
+    st.markdown(f'<div class="metric-container"><div class="metric-title">Peak Time</div><div class="metric-value" style="font-size:1.4rem; color:#FFB75E;">{peak_time_str}</div></div>', unsafe_allow_html=True)
+with col6:
+    st.markdown(f'<div class="metric-container"><div class="metric-title">Peak Power</div><div class="metric-value" style="font-size:3rem; color:#FFB75E;">{peak_power_val:.2f} kW</div></div>', unsafe_allow_html=True)
 
 st.markdown("<br><br>", unsafe_allow_html=True)
 
@@ -267,9 +292,9 @@ fig.update_layout(
     )
 )
 
-st.plotly_chart(fig, use_container_width=True)
+st.plotly_chart(fig, width='stretch')
 
-st.markdown("<br><br><div class='sub-header'>Next 24 Hours Generation Prediction</div>", unsafe_allow_html=True)
+st.markdown(f"<br><br><div class='sub-header'>Next 24 Hours Generation Prediction (Peak Time: {peak_time_str})</div>", unsafe_allow_html=True)
 
 fig2 = go.Figure()
 
@@ -293,4 +318,4 @@ fig2.update_layout(
     yaxis=dict(showgrid=True, gridcolor='rgba(255,255,255,0.05)', title="Power Output (kW)"),
 )
 
-st.plotly_chart(fig2, use_container_width=True)
+st.plotly_chart(fig2, width='stretch')
